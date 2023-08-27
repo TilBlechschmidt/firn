@@ -1,5 +1,4 @@
 use super::Database;
-use sled::IVec;
 use std::{collections::HashMap, fmt::Display};
 
 type Value = IVec;

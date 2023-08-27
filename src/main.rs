@@ -1,4 +1,4 @@
-use db::Database;
+use db::{Attribute, Database, Entity, Value};
 use extractor::*;
 use handle::Handle;
 use std::{
@@ -28,7 +28,7 @@ impl ExtractorInstance {
         }
     }
 
-    fn init(&mut self, handle: &Handle) {
+    fn init(&mut self, handle: &mut Handle) {
         let start = Instant::now();
 
         if let Err(e) = self.extractor.init(handle) {
@@ -38,7 +38,13 @@ impl ExtractorInstance {
         self.init_time = start.elapsed();
     }
 
-    fn entry_added(&mut self, handle: &Handle, entity: &str, attribute: &str, value: &str) {
+    fn entry_added(
+        &mut self,
+        handle: &mut Handle,
+        entity: &Entity,
+        attribute: &Attribute,
+        value: &Value,
+    ) {
         let start = Instant::now();
 
         if let Err(e) = self.extractor.entry_added(handle, entity, attribute, value) {
@@ -61,26 +67,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     let storage = current_dir()?.join("data/storage");
     std::fs::create_dir_all(&storage)?;
 
-    let mut handle = Handle::new(Database::temporary()?, storage.clone());
+    let (database, write_log) = Database::new();
+    let mut handle = Handle::new(database, storage.clone());
 
     let mut extractors = make_extractors![
         "loader" => BlobLoader(storage),
-        "mime" => MimeInfer::new(),
+        "mime" => MimeInfer,
+        "exif" => ExifExtractor,
         "log" => Logger
     ];
 
     // Give all extractors a chance to initialize
     for extractor in extractors.iter_mut() {
-        extractor.init(&handle);
+        extractor.init(&mut handle);
     }
 
     // Run over all the stuff
-    while let Some((e, a, v)) = handle.pop_from_log()? {
+    while let Ok((e, a, v)) = write_log.recv_timeout(Duration::from_millis(100)) {
         for extractor in extractors.iter_mut() {
-            extractor.entry_added(&handle, &e, &a, &v);
+            extractor.entry_added(&mut handle, &e, &a, &v);
         }
     }
 
+    // Print some stats
     for extractor in extractors {
         println!(
             "{:0>4}ms -> {:0>4}ms for {}",

@@ -1,156 +1,163 @@
 #![allow(dead_code)]
 
-use sled::{Db, IVec, Mode};
+use std::{fmt, sync::mpsc};
 use triplet_tree::TripletTree;
-use write_log::WriteLog;
 
 mod query;
 mod triplet_tree;
-mod write_log;
 
-pub use query::*;
+// pub use query::*;
+// use crate::{bindings, query};
 
-use crate::{bindings, query};
+#[derive(PartialEq, Eq, Hash, Clone)]
+pub struct Entity(pub String);
 
-// Triplets are stored as ((entity_length, entity, attribute), [value]) tuples.
-//
-// fn main() -> Result<(), sled::Error> {
-//     // Create instance
-//     let mut db = Database::temporary()?;
-//
-//     // Insert entity #1
-//     db.insert("1", ":time/stamp", "42")?;
-//     db.insert("1", ":doc/size", [255])?;
-//
-//     // Insert entity #2
-//     db.insert("2", ":time/stamp", "42")?;
-//     db.insert("2", ":doc/size", [37])?;
-//
-//     // Build a query
-//     let rules = find!(?entity, ?size :where [
-//         [entity, ":time/stamp", "42"],
-//         [entity, ":doc/size", size]
-//     ]);
-//
-//     // Execute and print
-//     db.query(rules).iter().for_each(println);
-//
-//     // Output:
-//     //  { size = [37], entity = "2" }
-//     //  { size = [255], entity = "1" }
-//
-//     Ok(())
-// }
-//
-// fn println<T: Display>(value: T) {
-//     println!("{value}");
-// }
+#[derive(PartialEq, Eq, Hash, Clone)]
+pub struct Attribute {
+    pub namespace: String,
+    pub entry: String,
+}
+
+#[derive(PartialEq, Eq, Hash, Debug, Clone)]
+pub enum Value {
+    Reference(Entity),
+    Data(String),
+}
+
+impl fmt::Debug for Attribute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, ":{}/{}", self.namespace, self.entry)
+    }
+}
+
+impl fmt::Debug for Entity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
+impl From<String> for Entity {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for Entity {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Self::Data(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Self::Data(value.to_string())
+    }
+}
+
+impl From<Entity> for Value {
+    fn from(entity: Entity) -> Self {
+        Self::Reference(entity)
+    }
+}
+
+impl From<&Entity> for Value {
+    fn from(entity: &Entity) -> Self {
+        Self::Reference(entity.clone())
+    }
+}
+
+#[macro_export]
+macro_rules! attribute {
+    ($namespace:ident / $entry:ident) => {
+        Attribute {
+            namespace: String::from(stringify!($namespace)),
+            entry: String::from(stringify!($entry)),
+        }
+    };
+}
+
 pub struct Database {
-    pub eav: TripletTree,
+    pub eav: TripletTree<Entity, Attribute, Value>,
     // aev: TripletTree,
-    pub ave: TripletTree,
-    pub vae: TripletTree,
+    pub ave: TripletTree<Attribute, Value, Entity>,
+    pub vae: TripletTree<Value, Attribute, Entity>,
 
-    write_log: WriteLog,
+    write_log: mpsc::Sender<(Entity, Attribute, Value)>,
 }
 
 impl Database {
-    pub fn temporary() -> sled::Result<Self> {
-        Self::new(
-            sled::Config::new()
-                .temporary(true)
-                .mode(Mode::HighThroughput)
-                .open()?,
+    pub fn new() -> (Self, mpsc::Receiver<(Entity, Attribute, Value)>) {
+        let eav = TripletTree::default();
+        let ave = TripletTree::default();
+        let vae = TripletTree::default();
+        let (write_log, rx) = mpsc::channel();
+
+        (
+            Self {
+                eav,
+                ave,
+                vae,
+                write_log,
+            },
+            rx,
         )
     }
 
-    pub fn new(db: Db) -> sled::Result<Self> {
-        let eav = TripletTree::new(db.open_tree("eav")?);
-        let ave = TripletTree::new(db.open_tree("ave")?);
-        let vae = TripletTree::new(db.open_tree("vae")?);
-        let write_log = WriteLog::new(db.open_tree("write_log")?);
-
-        Ok(Self {
-            eav,
-            ave,
-            vae,
-            write_log,
-        })
-    }
-
     pub fn insert(
-        &self,
-        entity: impl AsRef<str>,
-        attribute: impl AsRef<str>,
-        value: impl AsRef<str>,
-    ) -> sled::Result<()> {
+        &mut self,
+        entity: impl Into<Entity>,
+        attribute: impl Into<Attribute>,
+        value: impl Into<Value>,
+    ) {
+        let entity = entity.into();
+        let attribute = attribute.into();
+        let value = value.into();
+
         self.write_log
-            .push(entity.as_ref(), attribute.as_ref(), value.as_ref())?;
+            .send((entity.clone(), attribute.clone(), value.clone()))
+            .ok();
 
-        let entity = entity.as_ref().as_bytes();
-        let attribute = attribute.as_ref().as_bytes();
-        let value = value.as_ref().as_bytes();
-
-        self.eav.append(&entity, &attribute, &value)?;
-        self.insert_into_indices(entity, attribute, value)
+        self.eav
+            .append(entity.clone(), attribute.clone(), value.clone());
+        self.insert_into_indices(entity, attribute, value);
     }
 
-    fn insert_into_indices(
-        &self,
-        entity: impl AsRef<[u8]>,
-        attribute: impl AsRef<[u8]>,
-        value: impl AsRef<[u8]>,
-    ) -> sled::Result<()> {
+    fn insert_into_indices(&mut self, entity: Entity, attribute: Attribute, value: Value) {
         // self.aev.append(&attribute, &entity, &value)?;
-        self.ave.append(&attribute, &value, &entity)?;
-        self.vae.append(&value, &attribute, &entity)?;
-        Ok(())
+        self.ave
+            .append(attribute.clone(), value.clone(), entity.clone());
+        self.vae.append(value, attribute, entity);
     }
 
-    pub fn rebuild_indices(&self) -> sled::Result<()> {
+    pub fn rebuild_indices(&mut self) {
         // self.aev.clear()?;
-        self.ave.clear()?;
-        self.vae.clear()?;
+        self.ave.clear();
+        self.vae.clear();
 
-        for entry in self.eav.scan_key2_prefix([], []) {
-            let (entity, attribute, values) = entry?;
+        for entry in self.eav.scan() {
+            let (entity, attribute, values) = entry;
 
             for value in values {
-                self.insert_into_indices(&entity, &attribute, value)?;
+                // Code duplication here bc the borrow checker wouldn't be happy otherwise :(
+                self.ave
+                    .append(attribute.clone(), value.clone(), entity.clone());
+                self.vae
+                    .append(value.clone(), attribute.clone(), entity.clone());
             }
         }
-
-        Ok(())
     }
 
-    pub fn get(
-        &self,
-        entity: impl AsRef<[u8]>,
-        attribute: impl AsRef<[u8]>,
-    ) -> impl Iterator<Item = IVec> {
-        bindings![?value];
-        query!(self, [[entity, attribute, value]])
-            .into_iter()
-            .flat_map(move |mut set| set.take(&value))
+    pub fn get(&self, entity: &Entity, attribute: &Attribute) -> impl Iterator<Item = &Value> {
+        self.eav.values(entity, attribute)
+        // bindings![?value];
+        // query!(self, [[entity, attribute, value]])
+        //     .into_iter()
+        //     .flat_map(move |mut set| set.take(&value))
     }
-
-    // This function is mutable to prevent regular users of an instance from taking stuff, cheesy I know but oh well
-    pub fn pop_from_log(&mut self) -> sled::Result<Option<(String, String, String)>> {
-        self.write_log.pop()
-    }
-}
-
-fn length_prefixed_concatenate_merge(
-    _key: &[u8],
-    old_value: Option<&[u8]>,
-    merged_bytes: &[u8],
-) -> Option<Vec<u8>> {
-    let mut ret = old_value.map(<[_]>::to_vec).unwrap_or_default();
-
-    leb128::write::unsigned(&mut ret, merged_bytes.len() as u64)
-        .expect("failed to write to vector");
-
-    ret.extend_from_slice(merged_bytes);
-
-    Some(ret)
 }
