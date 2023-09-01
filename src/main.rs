@@ -1,14 +1,18 @@
-use db::{Attribute, Database, Entity, Value};
+use db::{Attribute, Database, Entity, Rule, Value, Variable, VariableSetExt};
 use extractor::*;
 use handle::Handle;
 use std::{
     env::current_dir,
     error::Error,
+    fs::{create_dir_all, File},
+    path::PathBuf,
     time::{Duration, Instant},
 };
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 mod db;
 mod extractor;
+mod graph_export;
 mod handle;
 
 struct ExtractorInstance {
@@ -74,7 +78,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         "loader" => BlobLoader(storage),
         "mime" => MimeInfer,
         "exif" => ExifExtractor,
-        "log" => Logger
+        "geonames" => GeoNames::load("/Users/tibl/Downloads/DE/DE.txt", "/Users/tibl/Downloads/hierarchy.txt")?
+        // "log" => Logger
     ];
 
     // Give all extractors a chance to initialize
@@ -98,6 +103,49 @@ fn main() -> Result<(), Box<dyn Error>> {
             extractor.name
         );
     }
+
+    println!("{} triplets stored", handle.len());
+
+    // query!(handle where (?time, ?make, #model, #image) match [
+    //     { #model, :"device/manufacturer", ?make },
+    //     { #image, :"image/camera", #model },
+    //     { #image, :"time/creation", ?time}
+    // ] => images);
+
+    // print_results!(images => make, model, image, time);
+
+    // query!(handle where (#a, #b, ?label) match [
+    //     { #a, :"relation/parent", #b },
+    //     { #a, :"text/label", ?label }
+    // ] => geonames);
+
+    // print_results!(geonames => a, label);
+
+    query!(handle where (#town, #image) match [
+        { #town, :"text/label", ?"Geesthacht" },
+        { #image, :"location/geoname", #town }
+    ] => images);
+
+    dbg!(images.len());
+
+    // let start = Instant::now();
+
+    // query!(handle where (#camera, ?make) match [
+    //     { #camera, :"device/manufacturer", ?make}
+    // ] => cameras);
+
+    // query!(handle where (#image) match [
+    //     { #image, :"image/camera", #Entity::from("Rollei Bullet 3S 720P") }
+    // ] => images);
+
+    // println!("{} ns", start.elapsed().as_nanos());
+
+    // print_results!(cameras => camera, make);
+    // print_results!(images => image);
+
+    // std::thread::sleep(Duration::from_secs(15));
+
+    // graph_export::export_graph(&handle)?;
 
     Ok(())
 }

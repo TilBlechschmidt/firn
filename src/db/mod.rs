@@ -6,56 +6,81 @@ use triplet_tree::TripletTree;
 mod query;
 mod triplet_tree;
 
-// pub use query::*;
-// use crate::{bindings, query};
+pub use query::*;
 
 #[derive(PartialEq, Eq, Hash, Clone)]
 pub struct Entity(pub String);
 
 #[derive(PartialEq, Eq, Hash, Clone)]
-pub struct Attribute {
-    pub namespace: String,
-    pub entry: String,
-}
+pub struct Attribute(pub String);
 
-#[derive(PartialEq, Eq, Hash, Debug, Clone)]
+pub type Data = String;
+
+#[derive(PartialEq, Eq, Hash, Clone)]
 pub enum Value {
     Reference(Entity),
-    Data(String),
+    Data(Data),
+}
+
+impl Value {
+    /// Attempts to borrow the contained data but panics if this value contains a reference.
+    ///
+    /// This is usually helpful when using the `query!` macro as it automatically turns
+    /// variables containing references into entity variables and thus all value vars contain data.
+    pub fn data(&self) -> &str {
+        match self {
+            Value::Reference(_) => {
+                panic!("attempted to take data from value that contained a reference")
+            }
+            Value::Data(data) => data.as_str(),
+        }
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Reference(entity) => write!(f, "Ref({})", entity.0),
+            Value::Data(data) => write!(f, "{data}"),
+        }
+    }
 }
 
 impl fmt::Debug for Attribute {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, ":{}/{}", self.namespace, self.entry)
+        write!(f, "{}", self.0)
     }
 }
 
 impl fmt::Debug for Entity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "#{}", self.0)
+        write!(f, "{}", self.0)
     }
 }
 
-impl From<String> for Entity {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&str> for Entity {
-    fn from(value: &str) -> Self {
+impl<T> From<T> for Entity
+where
+    T: ToString,
+{
+    fn from(value: T) -> Self {
         Self(value.to_string())
     }
 }
 
-impl From<String> for Value {
-    fn from(value: String) -> Self {
-        Self::Data(value)
+impl<T> From<T> for Attribute
+where
+    T: ToString,
+{
+    fn from(value: T) -> Self {
+        Self(value.to_string())
     }
 }
 
-impl From<&str> for Value {
-    fn from(value: &str) -> Self {
+impl<T> From<T> for Value
+where
+    T: ToString,
+{
+    fn from(value: T) -> Self {
         Self::Data(value.to_string())
     }
 }
@@ -70,16 +95,6 @@ impl From<&Entity> for Value {
     fn from(entity: &Entity) -> Self {
         Self::Reference(entity.clone())
     }
-}
-
-#[macro_export]
-macro_rules! attribute {
-    ($namespace:ident / $entry:ident) => {
-        Attribute {
-            namespace: String::from(stringify!($namespace)),
-            entry: String::from(stringify!($entry)),
-        }
-    };
 }
 
 pub struct Database {
@@ -107,6 +122,10 @@ impl Database {
             },
             rx,
         )
+    }
+
+    pub fn len(&self) -> usize {
+        self.eav.len()
     }
 
     pub fn insert(

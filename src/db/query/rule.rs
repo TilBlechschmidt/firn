@@ -1,223 +1,195 @@
-use super::binding::{Binding, BindingSet, Variable};
+use super::{
+    binding::{Variable, VariableSetExt},
+    VariableSet,
+};
 use crate::db::{triplet_tree::TripletTree, Attribute, Database, Entity, Value};
+use std::{borrow::Cow, hash::Hash};
 
-#[derive(Debug)]
-enum ResolveVariant<'v> {
-    Single(Binding, Binding, &'v Variable),
-    Double(Binding, &'v Variable, &'v Variable),
-    Triple(&'v Variable, &'v Variable, &'v Variable),
+enum ResolveVariant<'v, A, B, C> {
+    Single(A, B, &'v Variable<C>),
+    Double(A, &'v Variable<B>, &'v Variable<C>),
+    Triple(&'v Variable<A>, &'v Variable<B>, &'v Variable<C>),
 }
 
-#[derive(Debug)]
+// This is mostly a convenience helper to make the rule definition a bit nicer
+// by allowing the straight use of constants without inserting them into the VariableSet
+#[derive(Clone)]
+pub enum RuleVal<'v, T: Clone> {
+    Variable(Cow<'v, Variable<T>>),
+    Constant(T),
+}
+
+impl<'v, T: Clone> RuleVal<'v, T>
+where
+    VariableSet: VariableSetExt<T>,
+{
+    fn load(&self, set: &VariableSet) -> Self {
+        if let RuleVal::Variable(var) = &self {
+            if let Some(value) = set.get(&var) {
+                return RuleVal::Constant(value.clone());
+            }
+        }
+
+        self.clone()
+    }
+}
+
+impl<'v, T: Clone> From<&T> for RuleVal<'v, T> {
+    fn from(value: &T) -> Self {
+        Self::Constant(value.clone())
+    }
+}
+
+impl<'v, T> From<T> for RuleVal<'v, Entity>
+where
+    Entity: From<T>,
+{
+    fn from(value: T) -> Self {
+        Self::Constant(Entity::from(value))
+    }
+}
+
+impl<'v, T> From<T> for RuleVal<'v, Attribute>
+where
+    Attribute: From<T>,
+{
+    fn from(value: T) -> Self {
+        Self::Constant(Attribute::from(value))
+    }
+}
+
+impl<'v, T> From<T> for RuleVal<'v, Value>
+where
+    Value: From<T>,
+{
+    fn from(value: T) -> Self {
+        Self::Constant(Value::from(value))
+    }
+}
+
+impl<'v> From<&'v Variable<Entity>> for RuleVal<'v, Entity> {
+    fn from(value: &'v Variable<Entity>) -> Self {
+        Self::Variable(Cow::Borrowed(value))
+    }
+}
+
+impl<'v> From<&'v Variable<Attribute>> for RuleVal<'v, Attribute> {
+    fn from(value: &'v Variable<Attribute>) -> Self {
+        Self::Variable(Cow::Borrowed(value))
+    }
+}
+
+impl<'v> From<&'v Variable<Value>> for RuleVal<'v, Value> {
+    fn from(value: &'v Variable<Value>) -> Self {
+        Self::Variable(Cow::Borrowed(value))
+    }
+}
+
+impl<'v> From<&'v Variable<Entity>> for RuleVal<'v, Value> {
+    fn from(value: &'v Variable<Entity>) -> Self {
+        Self::Variable(Cow::Owned(value.clone().into()))
+    }
+}
+
 pub struct Rule<'v> {
-    entity: &'v Variable,
-    attribute: &'v Variable,
-    value: &'v Variable,
+    entity: RuleVal<'v, Entity>,
+    attribute: RuleVal<'v, Attribute>,
+    value: RuleVal<'v, Value>,
 }
 
 impl<'v> Rule<'v> {
-    pub fn new(entity: &'v Variable, attribute: &'v Variable, value: &'v Variable) -> Self {
+    pub fn new(
+        entity: impl Into<RuleVal<'v, Entity>>,
+        attribute: impl Into<RuleVal<'v, Attribute>>,
+        value: impl Into<RuleVal<'v, Value>>,
+    ) -> Self {
         Self {
-            entity,
-            attribute,
-            value,
+            entity: entity.into(),
+            attribute: attribute.into(),
+            value: value.into(),
         }
     }
 
-    pub(super) fn constrain(&'v self, set: BindingSet<'v>, db: &Database) -> Vec<BindingSet<'v>> {
+    pub(super) fn constrain(&self, set: VariableSet, db: &Database) -> Vec<VariableSet> {
         use ResolveVariant::{Double, Single, Triple};
+        use RuleVal::*;
 
-        let entity = self.entity;
-        let attribute = self.attribute;
-        let value = self.value;
-
-        // Map the binding combination to a tree and its corresponding rule variant
-        let (tree, variant): (&dyn Constrain, ResolveVariant) = match (
-            set.get(self.entity).cloned(),
-            set.get(self.attribute).cloned(),
-            set.get(self.value).cloned(),
+        // Map the binding combination to a tree and its corresponding resolve variant
+        match (
+            self.entity.load(&set),
+            self.attribute.load(&set),
+            self.value.load(&set),
         ) {
             // Constants only which are already bound so nothing to do here
-            (Some(_), Some(_), Some(_)) => return vec![set],
+            (Constant(_), Constant(_), Constant(_)) => vec![set],
 
             // 1 variable
-            (None, Some(attribute), Some(value)) => (&db.vae, Single(value, attribute, entity)),
-            (Some(entity), Some(attribute), None) => (&db.eav, Single(entity, attribute, value)),
-            (Some(_), None, Some(_)) => unimplemented!(),
+            (Variable(entity), Constant(attribute), Constant(value)) => {
+                db.vae.constrain(set, Single(value, attribute, &entity))
+            }
+            (Constant(entity), Constant(attribute), Variable(value)) => {
+                db.eav.constrain(set, Single(entity, attribute, &value))
+            }
+            (Constant(_), Variable(_), Constant(_)) => unimplemented!(),
 
             // 2 variables
-            (None, None, Some(value)) => (&db.vae, Double(value, attribute, entity)),
-            (Some(entity), None, None) => (&db.eav, Double(entity, attribute, value)),
-            (None, Some(attribute), None) => (&db.ave, Double(attribute, value, entity)),
+            (Variable(entity), Variable(attribute), Constant(value)) => {
+                db.vae.constrain(set, Double(value, &attribute, &entity))
+            }
+            (Constant(entity), Variable(attribute), Variable(value)) => {
+                db.eav.constrain(set, Double(entity, &attribute, &value))
+            }
+            (Variable(entity), Constant(attribute), Variable(value)) => {
+                db.ave.constrain(set, Double(attribute, &value, &entity))
+            }
 
             // 3 variables
-            (None, None, None) => (&db.eav, Triple(entity, attribute, value)),
-        };
-
-        tree.constrain(variant, set)
-    }
-}
-
-trait Constrain {
-    fn constrain<'v>(
-        &self,
-        variant: ResolveVariant<'v>,
-        set: BindingSet<'v>,
-    ) -> Vec<BindingSet<'v>>;
-}
-
-impl Constrain for TripletTree<Entity, Attribute, Value> {
-    fn constrain<'v>(
-        &self,
-        variant: ResolveVariant<'v>,
-        set: BindingSet<'v>,
-    ) -> Vec<BindingSet<'v>> {
-        use ResolveVariant::*;
-
-        match variant {
-            // Fetch all possible values and create a set for each of them
-            Single(Binding::Entity(entity), Binding::Attribute(attribute), value) => self
-                .values(&entity, &attribute)
-                .cloned()
-                .map(|binding| set.constrained(value, binding))
-                .collect(),
-
-            Double(Binding::Entity(entity), attribute, value) => self
-                .get(&entity)
-                .flat_map(|(a, values)| {
-                    values.iter().map(|v| {
-                        set.constrained(attribute, a.clone())
-                            .constrained(value, v.clone())
-                    })
-                })
-                .collect(),
-
-            // Scan the full table and create a set for each e+a+[v] combo
-            Triple(entity, attribute, value) => self
-                .scan()
-                .flat_map(|(e, a, values)| {
-                    values.iter().map(|v| {
-                        set.constrained(entity, e.clone())
-                            .constrained(attribute, a.clone())
-                            .constrained(value, v.clone())
-                    })
-                })
-                .collect(),
-
-            // Some binding does not have the correct type so truncate the tree here
-            _ => vec![],
+            (Variable(entity), Variable(attribute), Variable(value)) => {
+                db.eav.constrain(set, Triple(&entity, &attribute, &value))
+            }
         }
     }
 }
 
-impl Constrain for TripletTree<Value, Attribute, Entity> {
-    fn constrain<'v>(
-        &self,
-        variant: ResolveVariant<'v>,
-        set: BindingSet<'v>,
-    ) -> Vec<BindingSet<'v>> {
-        use ResolveVariant::*;
-
-        match variant {
-            // -- Single variant for both ref & data
-            Single(Binding::Entity(reference), Binding::Attribute(attribute), entity) => self
-                .values(&reference.into(), &attribute)
-                .cloned()
-                .map(|binding| set.constrained(entity, binding))
-                .collect(),
-
-            Single(Binding::Data(data), Binding::Attribute(attribute), entity) => self
-                .values(&data.as_str().into(), &attribute)
-                .cloned()
-                .map(|binding| set.constrained(entity, binding))
-                .collect(),
-
-            // -- Double variant for both ref & data
-            Double(Binding::Entity(reference), attribute, entity) => self
-                .get(&reference.into())
-                .flat_map(|(a, entities)| {
-                    entities.iter().map(|e| {
-                        set.constrained(attribute, a.clone())
-                            .constrained(entity, e.clone())
-                    })
-                })
-                .collect(),
-
-            Double(Binding::Data(data), attribute, entity) => self
-                .get(&data.as_str().into())
-                .flat_map(|(a, entities)| {
-                    entities.iter().map(|e| {
-                        set.constrained(attribute, a.clone())
-                            .constrained(entity, e.clone())
-                    })
-                })
-                .collect(),
-
-            // -- Triple variant
-            Triple(value, attribute, entity) => self
-                .scan()
-                .flat_map(|(v, a, entities)| {
-                    entities.iter().map(|e| {
-                        set.constrained(entity, e.clone())
-                            .constrained(attribute, a.clone())
-                            .constrained(value, v.clone())
-                    })
-                })
-                .collect(),
-
-            // Some binding does not have the correct type so truncate the tree here
-            _ => vec![],
-        }
-    }
+trait Constrain<A, B, C> {
+    fn constrain(&self, set: VariableSet, variant: ResolveVariant<A, B, C>) -> Vec<VariableSet>;
 }
 
-impl Constrain for TripletTree<Attribute, Value, Entity> {
-    fn constrain<'v>(
-        &self,
-        variant: ResolveVariant<'v>,
-        set: BindingSet<'v>,
-    ) -> Vec<BindingSet<'v>> {
+impl<A: Hash + Eq + Clone, B: Hash + Eq + Clone, C: Clone> Constrain<A, B, C>
+    for TripletTree<A, B, C>
+where
+    VariableSet: VariableSetExt<A>,
+    VariableSet: VariableSetExt<B>,
+    VariableSet: VariableSetExt<C>,
+{
+    fn constrain(&self, set: VariableSet, variant: ResolveVariant<A, B, C>) -> Vec<VariableSet> {
         use ResolveVariant::*;
 
         match variant {
-            // -- Single variant for both ref & data
-            Single(Binding::Attribute(attribute), Binding::Entity(reference), entity) => self
-                .values(&attribute, &reference.into())
+            Single(a, b, c) => self
+                .values(&a, &b)
                 .cloned()
-                .map(|binding| set.constrained(entity, binding))
+                .map(|binding| set.constrain(&c, binding))
                 .collect(),
 
-            Single(Binding::Attribute(attribute), Binding::Data(data), entity) => self
-                .values(&attribute, &data.as_str().into())
-                .cloned()
-                .map(|binding| set.constrained(entity, binding))
-                .collect(),
-
-            // -- Double variant for both ref & data
-            Double(Binding::Attribute(attribute), value, entity) => self
-                .get(&attribute)
-                .flat_map(|(v, entities)| {
-                    entities.iter().map(|e| {
-                        set.constrained(value, v.clone())
-                            .constrained(entity, e.clone())
-                    })
+            Double(a, b, c) => self
+                .get(&a)
+                .flat_map(|(v_b, v)| {
+                    v.iter()
+                        .map(|v_c| set.constrain(&b, v_b.clone()).constrain(&c, v_c.clone()))
                 })
                 .collect(),
 
-            // Scan the full table and create a set for each e+a+[v] combo
-            Triple(attribute, value, entity) => self
+            Triple(a, b, c) => self
                 .scan()
-                .flat_map(|(a, v, entities)| {
-                    entities.iter().map(|e| {
-                        set.constrained(attribute, a.clone())
-                            .constrained(value, v.clone())
-                            .constrained(entity, e.clone())
+                .flat_map(|(v_a, v_b, v)| {
+                    v.iter().map(|v_c| {
+                        set.constrain(&a, v_a.clone())
+                            .constrain(&b, v_b.clone())
+                            .constrain(&c, v_c.clone())
                     })
                 })
                 .collect(),
-
-            // Some binding does not have the correct type so truncate the tree here
-            _ => vec![],
         }
     }
 }

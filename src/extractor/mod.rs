@@ -6,10 +6,12 @@ use std::error::Error;
 
 mod blob;
 mod exif;
+mod geonames;
 mod mime;
 
 pub use blob::BlobLoader;
 pub use exif::ExifExtractor;
+pub use geonames::GeoNames;
 pub use mime::MimeInfer;
 
 pub trait Extractor {
@@ -40,7 +42,7 @@ impl Extractor for Logger {
         attribute: &Attribute,
         value: &Value,
     ) -> Result<(), Box<dyn Error>> {
-        println!("+ {entity:?} {attribute:?} {value:?}");
+        println!("+ {entity:?} :{attribute:?} {value:?}");
         Ok(())
     }
 }

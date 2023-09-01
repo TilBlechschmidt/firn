@@ -1,107 +1,119 @@
 use super::super::{Attribute, Entity, Value};
-use std::{
-    collections::HashMap,
-    fmt,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{collections::HashMap, fmt, marker::PhantomData, sync::atomic::AtomicU64};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(PartialEq, Eq, Hash, Clone)]
-pub enum Variable {
-    Named(String),
-    Unnamed(u64),
-}
-
-#[derive(PartialEq, Eq, Hash, Clone)]
-pub enum Binding {
-    /// Can be used as literally and inside Value::Reference
-    Entity(Entity),
-    Attribute(Attribute),
-    /// Variant of value
-    Data(String),
-}
+pub struct Variable<T>(String, PhantomData<T>);
 
 #[derive(Default, Clone, Debug)]
-pub struct BindingSet<'v>(HashMap<&'v Variable, Binding>);
+pub struct VariableSet {
+    entity: HashMap<Variable<Entity>, Entity>,
+    attribute: HashMap<Variable<Attribute>, Attribute>,
+    value: HashMap<Variable<Value>, Value>,
+}
 
-impl Variable {
-    pub fn named(name: impl Into<String>) -> Self {
-        Self::Named(name.into())
-    }
-
-    pub fn unnamed() -> Self {
-        Self::Unnamed(COUNTER.fetch_add(1, Ordering::Acquire))
+impl<T> Variable<T> {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into(), PhantomData)
     }
 }
 
-impl<'v> BindingSet<'v> {
-    pub fn constrained(&self, variable: &'v Variable, binding: impl Into<Binding>) -> Self {
-        let mut copy = self.clone();
-        copy.0.insert(variable, binding.into());
-        copy
+impl From<Variable<Value>> for Variable<Entity> {
+    fn from(value: Variable<Value>) -> Self {
+        Variable::new(&value.0)
     }
+}
 
-    pub fn purge_unnamed(&mut self) {
-        let unnamed = self
-            .0
-            .keys()
-            .filter(|v| {
-                if let Variable::Unnamed(_) = v {
-                    true
-                } else {
-                    false
-                }
-            })
-            .map(|v| *v)
-            .collect::<Vec<_>>();
+impl From<Variable<Entity>> for Variable<Value> {
+    fn from(value: Variable<Entity>) -> Self {
+        Variable::new(&value.0)
+    }
+}
 
-        for var in unnamed {
-            self.0.remove(var);
+pub trait VariableSetExt<T> {
+    fn constrain(&self, variable: &Variable<T>, entry: T) -> Self;
+    fn get(&self, variable: &Variable<T>) -> Option<&T>;
+}
+
+impl VariableSetExt<Entity> for VariableSet {
+    fn constrain(&self, variable: &Variable<Entity>, entry: Entity) -> Self {
+        let mut instance = self.clone();
+
+        // Prevent two variables from having the same binding
+        if instance.entity.values().find(|v| **v == entry).is_none() {
+            instance.entity.insert(variable.clone(), entry.clone());
         }
-    }
 
-    pub fn get(&self, variable: &Variable) -> Option<&Binding> {
-        self.0.get(variable)
-    }
-}
-
-impl From<Entity> for Binding {
-    fn from(value: Entity) -> Self {
-        Self::Entity(value)
-    }
-}
-
-impl From<Attribute> for Binding {
-    fn from(value: Attribute) -> Self {
-        Self::Attribute(value)
-    }
-}
-
-impl From<Value> for Binding {
-    fn from(value: Value) -> Self {
-        match value {
-            Value::Reference(entity) => Self::from(entity),
-            Value::Data(data) => Self::Data(data),
+        let value = Value::Reference(entry);
+        if instance.value.values().find(|v| **v == value).is_none() {
+            instance.value.insert(variable.clone().into(), value);
         }
+
+        instance
+    }
+
+    fn get(&self, variable: &Variable<Entity>) -> Option<&Entity> {
+        self.entity.get(variable)
     }
 }
 
-impl fmt::Debug for Variable {
+impl VariableSetExt<Attribute> for VariableSet {
+    fn constrain(&self, variable: &Variable<Attribute>, entry: Attribute) -> Self {
+        let mut instance = self.clone();
+
+        // Prevent two variables from having the same binding
+        if instance.attribute.values().find(|v| **v == entry).is_none() {
+            instance.attribute.insert(variable.clone(), entry);
+        }
+
+        instance
+    }
+
+    fn get(&self, variable: &Variable<Attribute>) -> Option<&Attribute> {
+        self.attribute.get(variable)
+    }
+}
+
+impl VariableSetExt<Value> for VariableSet {
+    fn constrain(&self, variable: &Variable<Value>, entry: Value) -> Self {
+        let mut instance = self.clone();
+
+        if let Value::Reference(entity) = &entry {
+            if instance.entity.values().find(|v| *v == entity).is_none() {
+                instance
+                    .entity
+                    .insert(variable.clone().into(), entity.clone());
+            }
+        }
+
+        // Prevent two variables from having the same binding
+        if instance.value.values().find(|v| **v == entry).is_none() {
+            instance.value.insert(variable.clone(), entry);
+        }
+
+        instance
+    }
+
+    fn get(&self, variable: &Variable<Value>) -> Option<&Value> {
+        self.value.get(variable)
+    }
+}
+
+impl fmt::Debug for Variable<Entity> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Variable::Named(name) => write!(f, "?{name}"),
-            Variable::Unnamed(id) => write!(f, "?{id}"),
-        }
+        write!(f, "#{}", self.0)
     }
 }
 
-impl fmt::Debug for Binding {
+impl fmt::Debug for Variable<Attribute> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Binding::Entity(entity) => write!(f, "{entity:?}"),
-            Binding::Attribute(attribute) => write!(f, "{attribute:?}"),
-            Binding::Data(data) => write!(f, "\"{data}\""),
-        }
+        write!(f, ":{}", self.0)
+    }
+}
+
+impl fmt::Debug for Variable<Value> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "?{}", self.0)
     }
 }

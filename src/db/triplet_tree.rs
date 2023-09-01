@@ -10,6 +10,10 @@ impl<K1: Hash + Eq + Clone, K2: Hash + Eq + Clone, V> Default for TripletTree<K1
 }
 
 impl<K1: Hash + Eq + Clone, K2: Hash + Eq + Clone, V: Clone> TripletTree<K1, K2, V> {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
     /// Appends the value to the given key, retaining old values if present
     pub fn append(&mut self, key1: K1, key2: K2, value: V) {
         self.0
